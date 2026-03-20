@@ -74,12 +74,15 @@ if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
 fi
 
 # ── Global timeout watchdog ────────────────────────────────────────────────────
-# Cap total runtime at 10 seconds.  Each qdbus call has a 2-second timeout,
-# but N tabs + M Konsole windows can stack those up to a worst-case of
-# (6 + N + M) × 2 seconds.  The watchdog fires SIGTERM if we are still
-# running after 10 seconds; the EXIT trap cleans it up on normal exit so
+# Cap total runtime at 30 seconds.  Each qdbus/kdotool call has a 2-second
+# timeout; the worst-case stack is (6 + N + M) × 2 seconds where N is the
+# number of Konsole session tabs and M is the number of Konsole windows.
+# With 10 tabs and 2 windows all hanging, that is 36 seconds — the watchdog
+# fires SIGTERM before then.  The EXIT trap cleans it up on normal exit so
 # there is no orphan sleep process.
-( sleep 10; kill $$ 2>/dev/null ) &
+# Note: $$ inside ( ... ) & correctly refers to this script's PID in bash
+# (POSIX-specified — $$ is not re-evaluated in subshells).
+( sleep 30; kill $$ 2>/dev/null ) &
 _WATCHDOG_PID=$!
 trap 'kill "$_WATCHDOG_PID" 2>/dev/null' EXIT
 
@@ -87,9 +90,9 @@ trap 'kill "$_WATCHDOG_PID" 2>/dev/null' EXIT
 # A single pass builds CHAIN_PIDS and locates KONSOLE_PID simultaneously,
 # avoiding the double-walk the naive find+loop approach would require.
 #
-# PROC_ROOT defaults to /proc; override in tests to use a fake directory.
+# _NOTIFY_PROC_ROOT defaults to /proc; override in tests to use a fake directory.
 # _START_PID defaults to $$; override in tests to use a fake starting PID.
-PROC_ROOT="${PROC_ROOT:-/proc}"
+_NOTIFY_PROC_ROOT="${_NOTIFY_PROC_ROOT:-/proc}"
 
 declare -A CHAIN_PIDS
 KONSOLE_PID=""
@@ -98,7 +101,7 @@ pid="${_START_PID:-$$}"
 while [[ "$pid" -gt 1 ]]; do
     # Read process name via bash built-in — no cat fork.
     comm=""
-    [[ -f "${PROC_ROOT}/$pid/comm" ]] && read -r comm < "${PROC_ROOT}/$pid/comm"
+    [[ -f "${_NOTIFY_PROC_ROOT}/$pid/comm" ]] && read -r comm < "${_NOTIFY_PROC_ROOT}/$pid/comm"
 
     if [[ "$comm" == "konsole" ]]; then
         KONSOLE_PID="$pid"
@@ -113,13 +116,13 @@ while [[ "$pid" -gt 1 ]]; do
 
     # Read the parent PID from /proc/status via bash built-in — no awk fork.
     next_pid=""
-    if [[ -f "${PROC_ROOT}/$pid/status" ]]; then
+    if [[ -f "${_NOTIFY_PROC_ROOT}/$pid/status" ]]; then
         while IFS=$' \t' read -r key val _; do
             if [[ "$key" == "PPid:" ]]; then
                 next_pid="${val//[^0-9]/}"   # strip anything non-numeric
                 break
             fi
-        done < "${PROC_ROOT}/$pid/status"
+        done < "${_NOTIFY_PROC_ROOT}/$pid/status"
     fi
 
     [[ -z "$next_pid" || "$next_pid" -le 1 ]] && break
