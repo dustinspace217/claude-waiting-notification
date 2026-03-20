@@ -122,10 +122,11 @@ fi
 
 ACTIVE_UUID=$(timeout 2 kdotool getactivewindow 2>/dev/null || true)
 
-# Validate: non-empty and only alphanumeric/hyphen characters.
-# kdotool returns a KWin window UUID string on Wayland.  Consistent with the
-# integer validation applied to all qdbus return values below.
-if [[ -z "$ACTIVE_UUID" || ! "$ACTIVE_UUID" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+# Validate: non-empty and matching KWin's UUID format on Wayland.
+# kdotool returns window IDs as {xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx} with
+# curly braces — NOT a bare UUID.  The regex requires the braces explicitly;
+# a bare UUID (no braces) or any other format is rejected as invalid.
+if [[ -z "$ACTIVE_UUID" || ! "$ACTIVE_UUID" =~ ^\{[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\}$ ]]; then
     >&2 echo "notify-with-focus-check: kdotool returned no valid window identifier"
     _notify; exit 0
 fi
