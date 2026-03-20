@@ -10,7 +10,7 @@
 
 SCRIPT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/notify-with-focus-check.sh"
 
-# ── Helpers ─────────────────────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 # Write content to a file, creating parent dirs as needed.
 write_file() { mkdir -p "$(dirname "$1")"; printf '%s' "$2" > "$1"; }
@@ -27,7 +27,7 @@ fake_proc() {
 notify_fired()     { [[ -f "$MOCK_BIN/notify-fired" ]]; }
 notify_suppressed() { ! notify_fired; }
 
-# ── Setup / teardown ───────────────────────────────────────────────────────────
+# ── Setup / teardown ──────────────────────────────────────────────────────────
 
 setup() {
     # Temp bin dir prepended to PATH — mocks shadow system binaries.
@@ -61,14 +61,18 @@ exit 0'
     chmod +x "$MOCK_BIN/paplay"
 
     # --- kdotool mock ---------------------------------------------------------
-    # Reads MOCK_KDOTOOL_UUID / _CLASS / _PID from the environment; values are
-    # set in setup() below (not using :- inside the mock to avoid issues when
-    # tests intentionally export an empty string).
+    # Reads MOCK_KDOTOOL_UUID / _CLASS / _PID / _SEARCH_UUID from the environment;
+    # values are set in setup() below (not using :- inside the mock to avoid
+    # issues when tests intentionally export an empty string).
+    # 'search' returns MOCK_KDOTOOL_SEARCH_UUID — the UUID the click handler
+    # finds when it must locate Konsole via kdotool search (i.e. Konsole is
+    # not the currently focused window).
     write_file "$MOCK_BIN/kdotool" '#!/bin/bash
 case "${1:-}" in
     getactivewindow)    echo "$MOCK_KDOTOOL_UUID" ;;
     getwindowclassname) echo "$MOCK_KDOTOOL_CLASS" ;;
     getwindowpid)       echo "$MOCK_KDOTOOL_PID" ;;
+    search)             echo "$MOCK_KDOTOOL_SEARCH_UUID" ;;
 esac'
     chmod +x "$MOCK_BIN/kdotool"
 
@@ -76,6 +80,7 @@ esac'
     export MOCK_KDOTOOL_UUID="{4bb44a33-a5d6-4cca-9bb9-10bc9a3ec0f5}"
     export MOCK_KDOTOOL_CLASS="org.kde.konsole"
     export MOCK_KDOTOOL_PID="3000"
+    export MOCK_KDOTOOL_SEARCH_UUID="{4bb44a33-a5d6-4cca-9bb9-10bc9a3ec0f5}"
 
     # --- qdbus-qt6 mock -------------------------------------------------------
     write_file "$MOCK_BIN/qdbus-qt6" '#!/bin/bash
@@ -119,7 +124,7 @@ teardown() {
     # Sentinel ($MOCK_BIN/notify-fired) is removed as part of rm -rf $MOCK_BIN.
 }
 
-# ── Prerequisite / early-exit tests ────────────────────────────────────────────
+# ── Prerequisite / early-exit tests ──────────────────────────────────────────
 # Tests 01–03 exit before the watchdog is set up, so the restricted PATH used
 # by 01, 02, and 02c does not cause issues with the watchdog's sleep call.
 # Test 02b also uses restricted PATH but runs the full script — it installs
@@ -239,7 +244,7 @@ esac'
     [[ "$output" == *"ancestor konsole process not found"* ]]
 }
 
-@test "05: kdotool getactivewindow returns empty → _notify fires" {
+@test "05: kdotool getactivewindow returns empty → notification fires" {
     export MOCK_KDOTOOL_UUID=""
     run bash "$SCRIPT"
     [ "$status" -eq 0 ]
@@ -247,7 +252,7 @@ esac'
     [[ "$output" == *"kdotool returned no valid window identifier"* ]]
 }
 
-@test "06: kdotool getactivewindow returns malformed output → _notify fires" {
+@test "06: kdotool getactivewindow returns malformed output → notification fires" {
     export MOCK_KDOTOOL_UUID="not-a-valid-uuid"
     run bash "$SCRIPT"
     [ "$status" -eq 0 ]
@@ -255,7 +260,7 @@ esac'
     [[ "$output" == *"kdotool returned no valid window identifier"* ]]
 }
 
-# ── UUID regex tests (direct, no script invocation) ─────────────────────────────
+# ── UUID regex tests (direct, no script invocation) ───────────────────────────
 # These validate the regex independently of the rest of the script, which is
 # cleaner and avoids mock complexity for what is a pure string-matching test.
 
@@ -283,9 +288,9 @@ esac'
     ! [[ "$uuid" =~ $regex ]]
 }
 
-# ── Focus / window detection tests ─────────────────────────────────────────────
+# ── Focus / window detection tests ───────────────────────────────────────────
 
-@test "07: active window class is not org.kde.konsole → _notify fires" {
+@test "07: active window class is not org.kde.konsole → notification fires" {
     export MOCK_KDOTOOL_CLASS="com.example.otherapp"
     run bash "$SCRIPT"
     [ "$status" -eq 0 ]
@@ -293,7 +298,7 @@ esac'
     [[ "$output" == *"active window class is not Konsole"* ]]
 }
 
-@test "08: active window PID does not match KONSOLE_PID → _notify fires" {
+@test "08: active window PID does not match KONSOLE_PID → notification fires" {
     export MOCK_KDOTOOL_PID="9999"   # KONSOLE_PID is 3000
     run bash "$SCRIPT"
     [ "$status" -eq 0 ]
@@ -301,7 +306,7 @@ esac'
     [[ "$output" == *"active window PID"*"does not match konsole PID"* ]]
 }
 
-@test "08b: kdotool getwindowpid returns non-integer → _notify fires" {
+@test "08b: kdotool getwindowpid returns non-integer → notification fires" {
     # The integer validation checks ^[0-9]+$ before comparing to KONSOLE_PID.
     # Test 08 covers a numeric-but-mismatched PID.  This test covers the
     # non-integer branch: the regex fails and the script fires _notify with a
@@ -313,7 +318,7 @@ esac'
     [[ "$output" == *"kdotool getwindowpid returned non-integer"* ]]
 }
 
-@test "09: Konsole D-Bus service unreachable → _notify fires" {
+@test "09: Konsole D-Bus service unreachable → notification fires" {
     write_file "$MOCK_BIN/qdbus-qt6" '#!/bin/bash
 exit 1'
     chmod +x "$MOCK_BIN/qdbus-qt6"
@@ -323,7 +328,7 @@ exit 1'
     [[ "$output" == *"could not reach Konsole D-Bus service"* ]]
 }
 
-@test "10: fallback D-Bus PID mismatch → _notify fires" {
+@test "10: fallback D-Bus PID mismatch → notification fires" {
     write_file "$MOCK_BIN/qdbus-qt6" '#!/bin/bash
 SVC="${1:-}"; OBJ="${2:-}"
 case "$SVC" in
@@ -342,7 +347,7 @@ esac'
     [[ "$output" == *"fallback D-Bus service PID"*"does not match"* ]]
 }
 
-@test "10b: fallback D-Bus PID is non-integer → _notify fires" {
+@test "10b: fallback D-Bus PID is non-integer → notification fires" {
     # Exercises the non-integer branch of the fallback PID check.
     # Test 10 covers a numeric-but-wrong PID (9999).  This test has
     # org.freedesktop.DBus return an empty string so fallback_pid="" fails the
@@ -365,9 +370,9 @@ esac'
     [[ "$output" == *"fallback D-Bus service returned non-integer PID"* ]]
 }
 
-# ── Session / tab detection tests ───────────────────────────────────────────────
+# ── Session / tab detection tests ─────────────────────────────────────────────
 
-@test "13: no /Sessions/N objects in D-Bus output → _notify fires" {
+@test "13: no /Sessions/N objects in D-Bus output → notification fires" {
     export MOCK_OBJECTS="/Windows/1 /MainWindow/1"
     run bash "$SCRIPT"
     [ "$status" -eq 0 ]
@@ -375,7 +380,7 @@ esac'
     [[ "$output" == *"could not identify our Konsole session tab"* ]]
 }
 
-@test "14: session processId not in CHAIN_PIDS → _notify fires" {
+@test "14: session processId not in CHAIN_PIDS → notification fires" {
     export MOCK_SESSION_PID="99999"   # not in {5000, 4000}
     run bash "$SCRIPT"
     [ "$status" -eq 0 ]
@@ -383,7 +388,7 @@ esac'
     [[ "$output" == *"could not identify our Konsole session tab"* ]]
 }
 
-@test "15: session processId returns non-integer → session skipped, _notify fires" {
+@test "15: session processId returns non-integer → session skipped, notification fires" {
     export MOCK_SESSION_PID="not-a-number"
     run bash "$SCRIPT"
     [ "$status" -eq 0 ]
@@ -398,7 +403,7 @@ esac'
     [[ "$output" != *"could not identify our Konsole session tab"* ]]
 }
 
-# ── Current-tab / suppress decision tests ─────────────────────────────────────────
+# ── Current-tab / suppress decision tests ─────────────────────────────────────
 
 @test "17: our session IS currentSession of focused window → suppressed" {
     # MOCK_CURRENT_SESSION=1, OUR_SESSION_ID will be "1" — they match.
@@ -407,14 +412,14 @@ esac'
     notify_suppressed
 }
 
-@test "18: our session is NOT currentSession of any window → _notify fires" {
+@test "18: our session is NOT currentSession of any window → notification fires" {
     export MOCK_CURRENT_SESSION="2"   # OUR_SESSION_ID is "1"
     run bash "$SCRIPT"
     [ "$status" -eq 0 ]
     notify_fired
 }
 
-@test "19: currentSession returns non-integer → window skipped, _notify fires" {
+@test "19: currentSession returns non-integer → window skipped, notification fires" {
     export MOCK_CURRENT_SESSION="bad-value"
     run bash "$SCRIPT"
     [ "$status" -eq 0 ]
@@ -443,7 +448,7 @@ esac'
     notify_suppressed
 }
 
-# ── Process tree walk tests ──────────────────────────────────────────────────────
+# ── Process tree walk tests ───────────────────────────────────────────────────
 
 @test "21: konsole is direct parent → KONSOLE_PID found, no tree-walk error" {
     fake_proc "$FAKE_PROC" 7000 "bash"    6000
@@ -487,7 +492,7 @@ esac'
     [[ "$output" == *"ancestor konsole process not found"* ]]
 }
 
-# ── Fallback D-Bus path: full end-to-end ───────────────────────────────────────────
+# ── Fallback D-Bus path: full end-to-end ──────────────────────────────────────
 # Tests 10 and 10b exercise the fallback PID mismatch branches (early exit).
 # Test 09 makes both the primary and fallback services return empty.
 # These two tests are the first where the fallback path succeeds all the way
@@ -543,7 +548,7 @@ esac'
     notify_fired
 }
 
-# ── Session loop: skip-then-find ────────────────────────────────────────────────────
+# ── Session loop: skip-then-find ───────────────────────────────────────────────
 # Tests 14 and 15 exhaust the session loop with no match.  These two tests are
 # the first where the loop skips one session and then correctly finds another.
 
@@ -593,7 +598,7 @@ esac'
     notify_fired
 }
 
-# ── Window loop: malformed path is skipped ─────────────────────────────────────────
+# ── Window loop: malformed path is skipped ────────────────────────────────────
 # The window loop guards each path with [[ "$win_path" =~ ^/Windows/[0-9]+$ ]].
 # No previous test reaches the window loop with a malformed window path in the
 # objects list.
@@ -637,11 +642,14 @@ esac'
     notify_fired
 }
 
-# ── Clickable notification (click-to-focus) ───────────────────────────────────────────
-# Tests 30–32 exercise the _notify_clickable() code path — the final exit when
-# our tab exists but is not the currently visible one.  All three tests use a
-# qdbus-qt6 mock that returns "99" for currentSession() (so the window loop
-# never suppresses) and records when setCurrentSession() is called.
+# ── Clickable notification (click-to-focus) ───────────────────────────────────
+# Tests 30–34 exercise _notify_clickable() across its two main code paths:
+#   • Tests 30–32: final exit — Konsole is focused but our tab is in the
+#     background (ACTIVE_UUID is already our Konsole window; no kdotool search
+#     needed; KONSOLE_SVC/OBJECTS/OUR_SESSION_ID are all pre-fetched).
+#   • Tests 33–34: early exit — active window is NOT Konsole (the most common
+#     production scenario); the click handler must lazily find Konsole via
+#     kdotool search and lazily fetch D-Bus objects and session ID.
 
 @test "30: tab in background → notify-send called with --action flag" {
     # Override notify-send to record its arguments so we can verify --action.
@@ -713,6 +721,107 @@ esac"
 @test "32: notification dismissed (no click) → setCurrentSession not called" {
     # Default notify-send fires but outputs nothing — simulates dismiss.
     # qdbus-qt6: same as test 31 (records setCurrentSession calls).
+    write_file "$MOCK_BIN/qdbus-qt6" "#!/bin/bash
+SVC=\"\${1:-}\"; OBJ=\"\${2:-}\"; METHOD=\"\${3:-}\"
+case \"\$SVC\" in
+    org.kde.konsole*)
+        if [[ -z \"\$OBJ\" ]]; then
+            printf '/Sessions/1\n/Windows/1\n'
+        elif [[ \"\$OBJ\" == '/Sessions/1' ]]; then
+            echo '4000'
+        elif [[ \"\$OBJ\" == '/Windows/1' && \"\$METHOD\" == 'org.kde.konsole.Window.setCurrentSession' ]]; then
+            : > '$MOCK_BIN/set-session-fired'
+        elif [[ \"\$OBJ\" == '/Windows/1' ]]; then
+            echo '99'
+        fi ;;
+esac"
+    chmod +x "$MOCK_BIN/qdbus-qt6"
+
+    run bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+
+    # Allow the disowned background subshell to complete.
+    sleep 0.3
+
+    notify_fired
+    [[ ! -f "$MOCK_BIN/set-session-fired" ]]
+}
+
+@test "33: active window NOT Konsole, user clicks → lazy fetch finds Konsole and focuses it" {
+    # This is the primary production scenario: user is working in another app
+    # (e.g. a browser) when Claude finishes.  _notify_clickable exits at the
+    # early kdotool class check, so KONSOLE_SVC/OBJECTS/OUR_SESSION_ID are NOT
+    # pre-fetched.  The click handler must find Konsole via kdotool search and
+    # lazily fetch all D-Bus state.
+    #
+    # Setup:
+    #   MOCK_KDOTOOL_CLASS = "com.example.otherapp" → early exit at line 248
+    #   notify-send outputs "focus" → simulates click
+    #   kdotool search returns MOCK_KDOTOOL_SEARCH_UUID → the handler finds it
+    #   kdotool getwindowpid returns "3000" → matches KONSOLE_PID
+    #   qdbus-qt6 returns objects and records setCurrentSession
+
+    export MOCK_KDOTOOL_CLASS="com.example.otherapp"
+
+    # notify-send: write sentinel AND output "focus" to simulate click.
+    write_file "$MOCK_BIN/notify-send" "#!/bin/bash
+: > '$MOCK_BIN/notify-fired'
+echo focus"
+    chmod +x "$MOCK_BIN/notify-send"
+
+    # qdbus-qt6: returns objects; records setCurrentSession call.
+    write_file "$MOCK_BIN/qdbus-qt6" "#!/bin/bash
+SVC=\"\${1:-}\"; OBJ=\"\${2:-}\"; METHOD=\"\${3:-}\"
+case \"\$SVC\" in
+    org.kde.konsole*)
+        if [[ -z \"\$OBJ\" ]]; then
+            printf '/Sessions/1\n/Windows/1\n'
+        elif [[ \"\$OBJ\" == '/Sessions/1' ]]; then
+            echo '4000'   # in CHAIN_PIDS {5000,4000}
+        elif [[ \"\$OBJ\" == '/Windows/1' && \"\$METHOD\" == 'org.kde.konsole.Window.setCurrentSession' ]]; then
+            : > '$MOCK_BIN/set-session-fired'
+        elif [[ \"\$OBJ\" == '/Windows/1' ]]; then
+            echo '99'     # currentSession != our session → early exit fires
+        fi ;;
+esac"
+    chmod +x "$MOCK_BIN/qdbus-qt6"
+
+    # kdotool: active window check returns non-Konsole class; search returns
+    # Konsole's UUID; getwindowpid confirms its PID; windowactivate fires.
+    write_file "$MOCK_BIN/kdotool" "#!/bin/bash
+case \"\${1:-}\" in
+    getactivewindow)    echo \"\$MOCK_KDOTOOL_UUID\" ;;
+    getwindowclassname) echo \"\$MOCK_KDOTOOL_CLASS\" ;;
+    getwindowpid)       echo \"\$MOCK_KDOTOOL_PID\" ;;
+    search)             echo \"\$MOCK_KDOTOOL_SEARCH_UUID\" ;;
+    windowactivate)     : > '$MOCK_BIN/windowactivate-fired' ;;
+esac"
+    chmod +x "$MOCK_BIN/kdotool"
+
+    run bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+
+    # Poll for the disowned background subshell to complete.
+    local i=0
+    while [[ ! -f "$MOCK_BIN/set-session-fired" && $i -lt 20 ]]; do
+        sleep 0.1
+        i=$((i + 1))
+    done
+
+    notify_fired
+    [[ "$output" == *"active window class is not Konsole"* ]]
+    [[ -f "$MOCK_BIN/set-session-fired" ]]
+    [[ -f "$MOCK_BIN/windowactivate-fired" ]]
+}
+
+@test "34: active window NOT Konsole, notification dismissed → nothing focused" {
+    # Same early-exit scenario as test 33 but the user dismisses the
+    # notification without clicking — setCurrentSession must NOT be called.
+
+    export MOCK_KDOTOOL_CLASS="com.example.otherapp"
+
+    # Default notify-send mock: writes sentinel but outputs nothing (dismiss).
+
     write_file "$MOCK_BIN/qdbus-qt6" "#!/bin/bash
 SVC=\"\${1:-}\"; OBJ=\"\${2:-}\"; METHOD=\"\${3:-}\"
 case \"\$SVC\" in

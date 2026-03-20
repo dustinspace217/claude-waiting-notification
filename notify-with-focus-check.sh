@@ -51,15 +51,21 @@ _notify() {
 }
 
 # ── Notify-with-click-to-focus helper ─────────────────────────────────────────
-# Called at the final exit point: our tab is confirmed to exist in this Konsole
-# instance, but is not the currently visible tab.
+# Called at every exit point after KONSOLE_PID is identified — including early
+# exits where the user is in a different app entirely.
 #
 # Sends a desktop notification with a "Focus Claude" action button and plays the
-# chime immediately.  A background subshell then waits (via notify-send --wait)
-# for the user to click the action button; on click it:
-#   1. Calls setCurrentSession on every Konsole window — only the window that
+# chime immediately.  A background subshell waits (via notify-send --wait) for
+# the user to click the action button; on click it:
+#   1. Finds the Konsole window UUID — uses ACTIVE_UUID if it already belongs
+#      to our Konsole instance (PID matches), otherwise searches via kdotool.
+#   2. Lazily fetches KONSOLE_SVC / KONSOLE_OBJECTS if not already set —
+#      needed when called from early exits before D-Bus queries ran.
+#   3. Lazily finds OUR_SESSION_ID by walking the session list — needed at
+#      the same early exits where the tab walk had not yet run.
+#   4. Calls setCurrentSession on every Konsole window — only the window that
 #      owns our session ID responds, switching to the Claude tab.
-#   2. Calls kdotool windowactivate to raise the Konsole window to the
+#   5. Calls kdotool windowactivate to raise the Konsole window to the
 #      foreground (Wayland-native; routes through KWin's D-Bus API).
 #
 # The subshell is immediately disowned so the main script exits without waiting
@@ -67,19 +73,19 @@ _notify() {
 #
 # Requires: libnotify >= 0.7.8 for --action / --wait flags (standard on KDE
 #   Plasma; verify with: notify-send --version).
-# Globals read (inherited by the subshell automatically):
-#   QDBUS           – path to qdbus-qt6 or qdbus
-#   KONSOLE_SVC     – org.kde.konsole-<PID> D-Bus service name
-#   KONSOLE_OBJECTS – cached list of D-Bus objects for this Konsole instance
-#   OUR_SESSION_ID  – numeric ID of the tab that triggered this hook
-#   ACTIVE_UUID     – KWin window UUID of the focused Konsole window
+# Globals read (all required at call site; inherited by subshell automatically):
+#   KONSOLE_PID  – PID of the ancestor konsole process
+#   QDBUS        – path to qdbus-qt6 or qdbus
+#   CHAIN_PIDS   – associative array of PIDs in our process chain
+# Globals read lazily (used if set, fetched fresh if not):
+#   ACTIVE_UUID  – KWin UUID of the window active at hook invocation time
 _notify_clickable() {
     (
         # --wait blocks until the notification is dismissed or an action is
         # clicked.  On click, notify-send prints the action key ("focus") to
         # stdout and exits 0.  On dismiss with no click, it prints nothing and
         # exits non-zero.  '|| true' prevents a non-zero exit from killing the
-        # subshell so the paplay below always fires.
+        # subshell so we continue to the early exit below.
         action=$(notify-send \
             --app-name="Claude Code" \
             --icon=dialog-information \
@@ -89,20 +95,79 @@ _notify_clickable() {
             "Claude Code" \
             "Waiting for your input" 2>/dev/null || true)
 
-        if [[ "$action" == "focus" ]]; then
-            # Switch to our tab.  Calling setCurrentSession on every window is
-            # safe: windows that do not own session $OUR_SESSION_ID ignore it.
+        [[ "$action" != "focus" ]] && exit 0
+
+        # ── Step 1: Find the Konsole window UUID ──────────────────────────────
+        # Use ACTIVE_UUID if it is already our Konsole instance; otherwise
+        # search all windows for the one whose PID matches KONSOLE_PID.
+        konsole_uuid=""
+        active="${ACTIVE_UUID:-}"
+        if [[ -n "$active" ]] && \
+           [[ "$active" =~ ^\{[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\}$ ]]; then
+            active_class=$(kdotool getwindowclassname "$active" 2>/dev/null || true)
+            if [[ "$active_class" == "org.kde.konsole" ]]; then
+                active_pid=$(kdotool getwindowpid "$active" 2>/dev/null || true)
+                [[ "$active_pid" == "$KONSOLE_PID" ]] && konsole_uuid="$active"
+            fi
+        fi
+        if [[ -z "$konsole_uuid" ]]; then
+            # Active window was not our Konsole — search for it by PID.
+            # 'kdotool search konsole' lists all Konsole window UUIDs; we pick
+            # the one whose PID matches KONSOLE_PID so multi-instance setups
+            # always target the correct window.
+            while IFS= read -r candidate; do
+                [[ "$candidate" =~ ^\{[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\}$ ]] \
+                    || continue
+                win_pid=$(kdotool getwindowpid "$candidate" 2>/dev/null || true)
+                if [[ "$win_pid" == "$KONSOLE_PID" ]]; then
+                    konsole_uuid="$candidate"
+                    break
+                fi
+            done < <(kdotool search konsole 2>/dev/null || true)
+        fi
+
+        # ── Step 2: Fetch D-Bus service and object list ───────────────────────
+        # Always construct from KONSOLE_PID so we target our specific instance,
+        # not a stale or mismatched cached value from an early-exit code path.
+        konsole_svc="org.kde.konsole-${KONSOLE_PID}"
+        konsole_objects=$(timeout 2 "$QDBUS" "$konsole_svc" 2>/dev/null || true)
+        if [[ -z "$konsole_objects" ]]; then
+            konsole_svc="org.kde.konsole"
+            konsole_objects=$(timeout 2 "$QDBUS" "$konsole_svc" 2>/dev/null || true)
+        fi
+
+        # ── Step 3: Find our session ID ───────────────────────────────────────
+        # Walk /Sessions/* objects and match the one whose shell PID is in
+        # CHAIN_PIDS — the same walk the main script does, repeated here for
+        # exit paths that ran before the main walk completed.
+        our_session=""
+        if [[ -n "$konsole_objects" ]]; then
+            while IFS= read -r sess_path; do
+                [[ "$sess_path" =~ ^/Sessions/[0-9]+$ ]] || continue
+                sess_pid=$(timeout 2 "$QDBUS" "$konsole_svc" "$sess_path" \
+                    org.kde.konsole.Session.processId 2>/dev/null || true)
+                [[ "$sess_pid" =~ ^[0-9]+$ ]] || continue
+                if [[ -n "${CHAIN_PIDS[$sess_pid]+x}" ]]; then
+                    our_session="${sess_path##*/}"
+                    break
+                fi
+            done <<< "$konsole_objects"
+        fi
+
+        # ── Step 4: Switch to our tab ─────────────────────────────────────────
+        # Calling setCurrentSession on every window is safe: windows that do
+        # not own our session ID silently ignore it.
+        if [[ -n "$our_session" && -n "$konsole_objects" ]]; then
             while IFS= read -r win_path; do
                 [[ "$win_path" =~ ^/Windows/[0-9]+$ ]] || continue
-                "$QDBUS" "$KONSOLE_SVC" "$win_path" \
-                    org.kde.konsole.Window.setCurrentSession "$OUR_SESSION_ID" \
+                "$QDBUS" "$konsole_svc" "$win_path" \
+                    org.kde.konsole.Window.setCurrentSession "$our_session" \
                     2>/dev/null || true
-            done <<< "$KONSOLE_OBJECTS"
-
-            # Raise the Konsole window.  ACTIVE_UUID is the KWin UUID of this
-            # specific Konsole instance, captured during the early kdotool check.
-            kdotool windowactivate "$ACTIVE_UUID" 2>/dev/null || true
+            done <<< "$konsole_objects"
         fi
+
+        # ── Step 5: Raise and focus Konsole ───────────────────────────────────
+        [[ -n "$konsole_uuid" ]] && kdotool windowactivate "$konsole_uuid" 2>/dev/null || true
     ) &
     disown $!
 
@@ -238,26 +303,26 @@ ACTIVE_UUID=$(kdotool getactivewindow 2>/dev/null || true)
 # a bare UUID (no braces) or any other format is rejected as invalid.
 if [[ -z "$ACTIVE_UUID" || ! "$ACTIVE_UUID" =~ ^\{[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\}$ ]]; then
     >&2 echo "notify-with-focus-check: kdotool returned no valid window identifier"
-    _notify; exit 0
+    _notify_clickable; exit 0
 fi
 
 ACTIVE_CLASS=$(kdotool getwindowclassname "$ACTIVE_UUID" 2>/dev/null || true)
 
 if [[ "$ACTIVE_CLASS" != "org.kde.konsole" ]]; then
     >&2 echo "notify-with-focus-check: active window class is not Konsole ($ACTIVE_CLASS)"
-    _notify; exit 0
+    _notify_clickable; exit 0
 fi
 
 ACTIVE_WIN_PID=$(kdotool getwindowpid "$ACTIVE_UUID" 2>/dev/null || true)
 
 if [[ ! "$ACTIVE_WIN_PID" =~ ^[0-9]+$ ]]; then
     >&2 echo "notify-with-focus-check: kdotool getwindowpid returned non-integer ($ACTIVE_WIN_PID)"
-    _notify; exit 0
+    _notify_clickable; exit 0
 fi
 
 if [[ "$ACTIVE_WIN_PID" != "$KONSOLE_PID" ]]; then
     >&2 echo "notify-with-focus-check: active window PID ($ACTIVE_WIN_PID) does not match konsole PID ($KONSOLE_PID)"
-    _notify; exit 0
+    _notify_clickable; exit 0
 fi
 
 # Our Konsole instance is the focused window.  Now check which tab is active.
@@ -284,18 +349,18 @@ if [[ -z "$KONSOLE_OBJECTS" ]]; then
             org.freedesktop.DBus.GetConnectionUnixProcessID "$KONSOLE_SVC" 2>/dev/null || true)
         if [[ ! "$fallback_pid" =~ ^[0-9]+$ ]]; then
             >&2 echo "notify-with-focus-check: fallback D-Bus service returned non-integer PID ($fallback_pid)"
-            _notify; exit 0
+            _notify_clickable; exit 0
         fi
         if [[ "$fallback_pid" != "$KONSOLE_PID" ]]; then
             >&2 echo "notify-with-focus-check: fallback D-Bus service PID ($fallback_pid) does not match konsole PID ($KONSOLE_PID)"
-            _notify; exit 0
+            _notify_clickable; exit 0
         fi
     fi
 fi
 
 if [[ -z "$KONSOLE_OBJECTS" ]]; then
     >&2 echo "notify-with-focus-check: could not reach Konsole D-Bus service for PID $KONSOLE_PID"
-    _notify; exit 0
+    _notify_clickable; exit 0
 fi
 
 # ── Find the Konsole session (tab) whose shell is in our process chain ─────────
@@ -324,7 +389,7 @@ done <<< "$KONSOLE_OBJECTS"
 
 if [[ -z "$OUR_SESSION_ID" ]]; then
     >&2 echo "notify-with-focus-check: could not identify our Konsole session tab"
-    _notify; exit 0
+    _notify_clickable; exit 0
 fi
 
 # ── Check: is our tab the active tab in the focused Konsole window? ────────────
