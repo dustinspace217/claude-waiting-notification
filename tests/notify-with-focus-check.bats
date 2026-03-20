@@ -5,7 +5,7 @@
 # Requires:  sudo dnf install bats
 #
 # All external binaries (kdotool, qdbus-qt6, notify-send, paplay) are mocked
-# via PATH prepend.  Process-tree walks use PROC_ROOT + _START_PID so tests
+# via PATH prepend.  Process-tree walks use _NOTIFY_PROC_ROOT + _START_PID so tests
 # never depend on running inside a real Konsole session.
 
 SCRIPT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/notify-with-focus-check.sh"
@@ -36,7 +36,7 @@ setup() {
 
     # Temp fake /proc root.
     FAKE_PROC="$(mktemp -d)"
-    export PROC_ROOT="$FAKE_PROC"
+    export _NOTIFY_PROC_ROOT="$FAKE_PROC"
 
     rm -f "$BATS_TMPDIR/notify-fired"
 
@@ -120,8 +120,10 @@ teardown() {
 }
 
 # ── Prerequisite / early-exit tests ──────────────────────────────────────────
-# Tests 01–04 exit before the watchdog is set up, so the restricted PATH used
+# Tests 01–03 exit before the watchdog is set up, so the restricted PATH used
 # by 01 and 02 does not cause issues with the watchdog's sleep call.
+# Test 04 runs past the watchdog setup (it fails during the proc-tree walk);
+# the sleep shim in MOCK_BIN handles the watchdog's sleep call correctly.
 
 @test "01: kdotool not in PATH → _notify fires" {
     # Remove kdotool from MOCK_BIN, then run with PATH limited to MOCK_BIN so
@@ -131,7 +133,7 @@ teardown() {
     run env -i \
         "PATH=$MOCK_BIN" \
         "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" \
-        "PROC_ROOT=$PROC_ROOT" \
+        "_NOTIFY_PROC_ROOT=$_NOTIFY_PROC_ROOT" \
         "_START_PID=$_START_PID" \
         /usr/bin/bash "$SCRIPT"
     [ "$status" -eq 0 ]
@@ -145,7 +147,7 @@ teardown() {
     run env -i \
         "PATH=$MOCK_BIN" \
         "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" \
-        "PROC_ROOT=$PROC_ROOT" \
+        "_NOTIFY_PROC_ROOT=$_NOTIFY_PROC_ROOT" \
         "_START_PID=$_START_PID" \
         /usr/bin/bash "$SCRIPT"
     [ "$status" -eq 0 ]
