@@ -74,12 +74,13 @@ if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
 fi
 
 # ── Global timeout watchdog ────────────────────────────────────────────────────
-# Cap total runtime at 30 seconds.  Each qdbus/kdotool call has a 2-second
-# timeout; the worst-case stack is (6 + N + M) × 2 seconds where N is the
-# number of Konsole session tabs and M is the number of Konsole windows.
-# With 10 tabs and 2 windows all hanging, that is 36 seconds — the watchdog
-# fires SIGTERM before then.  The EXIT trap cleans it up on normal exit so
-# there is no orphan sleep process.
+# Cap total runtime at 30 seconds.  Each qdbus call has a 2-second timeout;
+# the worst-case D-Bus stack is (3 + N + M) × 2 seconds where N is the
+# number of Konsole session tabs and M is the number of Konsole windows
+# (3 = primary lookup + fallback lookup + PID verification).  kdotool calls
+# have no per-call timeout — they are fast in practice; this watchdog is
+# the backstop if KWin becomes unresponsive.  The EXIT trap cleans it up
+# on normal exit so there is no orphan sleep process.
 # Note: $$ inside ( ... ) & correctly refers to this script's PID in bash
 # (POSIX-specified — $$ is not re-evaluated in subshells).
 ( sleep 30; kill $$ 2>/dev/null ) &
@@ -117,9 +118,13 @@ while [[ "$pid" -gt 1 ]]; do
     # Read the parent PID from /proc/status via bash built-in — no awk fork.
     next_pid=""
     if [[ -f "${_NOTIFY_PROC_ROOT}/$pid/status" ]]; then
+        # IFS=$' \t' splits each line on spaces and tabs.  $'...' is ANSI-C
+        # quoting — the only portable way to embed a literal tab in a string
+        # without a subshell.  The trailing _ absorbs extra fields so key
+        # and val are always single tokens.
         while IFS=$' \t' read -r key val _; do
             if [[ "$key" == "PPid:" ]]; then
-                next_pid="${val//[^0-9]/}"   # strip anything non-numeric
+                next_pid="${val//[^0-9]/}"   # ${var//pat/} removes all matches; [^0-9] = any non-digit
                 break
             fi
         done < "${_NOTIFY_PROC_ROOT}/$pid/status"
@@ -140,7 +145,7 @@ fi
 # specific konsole instance, we fire immediately without querying Konsole's
 # session/window objects at all.
 
-ACTIVE_UUID=$(timeout 2 kdotool getactivewindow 2>/dev/null || true)
+ACTIVE_UUID=$(kdotool getactivewindow 2>/dev/null || true)
 
 # Validate: non-empty and matching KWin's UUID format on Wayland.
 # kdotool returns window IDs as {xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx} with
@@ -151,17 +156,17 @@ if [[ -z "$ACTIVE_UUID" || ! "$ACTIVE_UUID" =~ ^\{[0-9a-fA-F]{8}-([0-9a-fA-F]{4}
     _notify; exit 0
 fi
 
-ACTIVE_CLASS=$(timeout 2 kdotool getwindowclassname "$ACTIVE_UUID" 2>/dev/null || true)
+ACTIVE_CLASS=$(kdotool getwindowclassname "$ACTIVE_UUID" 2>/dev/null || true)
 
 if [[ "$ACTIVE_CLASS" != "org.kde.konsole" ]]; then
     # Focused window is not Konsole — user is in another application.
     _notify; exit 0
 fi
 
-ACTIVE_WIN_PID=$(timeout 2 kdotool getwindowpid "$ACTIVE_UUID" 2>/dev/null || true)
+ACTIVE_WIN_PID=$(kdotool getwindowpid "$ACTIVE_UUID" 2>/dev/null || true)
 
-if [[ "$ACTIVE_WIN_PID" != "$KONSOLE_PID" ]]; then
-    # Focused Konsole window belongs to a different konsole instance.
+if [[ ! "$ACTIVE_WIN_PID" =~ ^[0-9]+$ || "$ACTIVE_WIN_PID" != "$KONSOLE_PID" ]]; then
+    # PID was non-integer or belongs to a different konsole instance.
     _notify; exit 0
 fi
 
@@ -187,7 +192,7 @@ if [[ -z "$KONSOLE_OBJECTS" ]]; then
     if [[ -n "$KONSOLE_OBJECTS" ]]; then
         fallback_pid=$(timeout 2 "$QDBUS" org.freedesktop.DBus /org/freedesktop/DBus \
             org.freedesktop.DBus.GetConnectionUnixProcessID "$KONSOLE_SVC" 2>/dev/null || true)
-        if [[ "$fallback_pid" != "$KONSOLE_PID" ]]; then
+        if [[ ! "$fallback_pid" =~ ^[0-9]+$ || "$fallback_pid" != "$KONSOLE_PID" ]]; then
             >&2 echo "notify-with-focus-check: fallback D-Bus service PID ($fallback_pid) does not match konsole PID ($KONSOLE_PID)"
             _notify; exit 0
         fi
