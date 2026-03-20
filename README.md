@@ -14,23 +14,27 @@ This hook eliminates that noise. It fires only when you are actually away.
 
 ## How it works
 
-The hook uses a four-step detection strategy to determine whether your Claude tab is the currently visible, focused tab before deciding whether to notify.
+The hook uses a five-step detection strategy to determine whether your Claude tab is the currently visible, focused tab before deciding whether to notify.
 
 **Step 1 — Process tree walk**
 
 Starting from the hook's own PID, the script walks up the process tree through `/proc` using only bash built-ins (no forked subprocesses). It records every PID it passes through and stops when it finds an ancestor process named `konsole`. This gives it two things: the PID of the Konsole process that owns this tab, and a set of PIDs representing the process chain down to this hook.
 
-**Step 2 — D-Bus service lookup**
+**Step 2 — Early focus check via kdotool**
 
-Konsole registers itself on the session D-Bus bus under a predictable service name: `org.kde.konsole-<PID>`. The script constructs that name directly from the PID found in step 1 and fetches the full list of D-Bus objects Konsole is exposing in a single call. This list is cached and reused for all subsequent queries, avoiding redundant round-trips. If the PID-suffixed name is not found, it falls back to `org.kde.konsole` (used when only one Konsole instance is running).
+Before touching D-Bus at all, the script calls `kdotool getactivewindow` to get the KWin UUID of the currently focused window. It validates the UUID format, checks that the focused window's class is `org.kde.konsole`, and confirms that the window's PID matches the Konsole PID found in step 1. If any of these checks fail — the user is in a different app, a different Konsole instance, or the window ID is malformed — the notification fires immediately and D-Bus is never queried. This short-circuits the most common case (you are somewhere else) without any D-Bus overhead.
 
-**Step 3 — Tab identity matching via Konsole's session API**
+**Step 3 — D-Bus service lookup**
+
+KDE registers Konsole on the session D-Bus bus under a predictable service name: `org.kde.konsole-<PID>`. The script constructs that name directly from the PID found in step 1 and fetches the full list of D-Bus objects Konsole is exposing in a single call. This list is cached and reused for all subsequent queries, avoiding redundant round-trips. If the PID-suffixed name is not found, it falls back to `org.kde.konsole` (used when only one Konsole instance is running) and verifies via the D-Bus daemon that the service's PID still matches.
+
+**Step 4 — Tab identity matching via Konsole's session API**
 
 Konsole exposes each open tab as a D-Bus object under `/Sessions/<N>`. Each session has a `processId()` method that returns the PID of the shell running in that tab's terminal. The script iterates over every `/Sessions/` object and calls `processId()` on each one, checking whether the returned PID appears anywhere in the process chain recorded in step 1. When it finds a match, it has identified which session ID belongs to this Claude instance.
 
-**Step 4 — Focused window check via kdotool**
+**Step 5 — Active tab check via Konsole's window API**
 
-With the session ID known, the script uses `kdotool getactivewindow` to get the currently focused window, then verifies that the window belongs to the same Konsole process (not just any Konsole window on the system). If those match, it iterates over Konsole's `/Windows/` D-Bus objects and calls `currentSession()` on each one to find which tab is currently visible. If the visible tab's session ID matches the one identified in step 3, the user is already looking at the Claude tab and the notification is suppressed. In every other case — different app focused, different Konsole window, different tab — the notification fires.
+With the session ID known, the script iterates over Konsole's `/Windows/` D-Bus objects and calls `currentSession()` on each one to find which tab is currently visible. The focused window is already confirmed to be our Konsole instance (step 2). If the visible tab's session ID matches the one identified in step 4, the user is already looking at the Claude tab and the notification is suppressed. In every other case — different tab in the foreground — the notification fires.
 
 ---
 
@@ -39,7 +43,7 @@ With the session ID known, the script uses `kdotool getactivewindow` to get the 
 | Tool | How to install | How to verify |
 |---|---|---|
 | `kdotool` | `sudo dnf install kdotool` | `kdotool --version` should print a version string |
-| `qdbus` | Ships with Qt; usually already present on KDE | `qdbus --version` should exit cleanly |
+| `qdbus-qt6` (preferred) or `qdbus` | `sudo dnf install qt6-qttools` | `qdbus-qt6 --version` should exit cleanly |
 | `notify-send` | `sudo dnf install libnotify` | `notify-send "test"` should show a desktop notification |
 | `paplay` | `sudo dnf install pipewire-utils` (or `pulseaudio-utils`) | `paplay /usr/share/sounds/freedesktop/stereo/message-new-instant.oga` should play a sound |
 | KDE Plasma 6 | — | Check with `plasmashell --version` |
@@ -85,7 +89,7 @@ Add the following inside the top-level object in `~/.claude/settings.json`. If a
         "hooks": [
           {
             "type": "command",
-            "command": "~/.claude/hooks/notify-with-focus-check.sh"
+            "command": "bash ~/.claude/hooks/notify-with-focus-check.sh"
           }
         ]
       }
@@ -98,9 +102,21 @@ The `Notification` hook fires when Claude Code transitions to a state where it i
 
 ---
 
+## Running the tests
+
+```bash
+bats tests/notify-with-focus-check.bats
+```
+
+Requires bats: `sudo dnf install bats`
+
+The test suite has 24 tests covering all early-exit paths (missing tools, unset D-Bus address, no ancestor Konsole process), the UUID regex, every D-Bus failure mode, the session matching logic, and the suppress/notify decision. All tests use mocked binaries and a fake `/proc` tree — no real Konsole session is required.
+
+---
+
 ## Portability notes
 
-- **Konsole-specific.** The tab identity detection in steps 2 and 3 relies entirely on Konsole's D-Bus API (`org.kde.konsole.Session.processId`, `org.kde.konsole.Window.currentSession`). Other terminal emulators do not expose this API. The hook will fall back to always notifying if the D-Bus lookup fails.
+- **Konsole-specific.** The tab identity detection in steps 3 and 4 relies entirely on Konsole's D-Bus API (`org.kde.konsole.Session.processId`, `org.kde.konsole.Window.currentSession`). Other terminal emulators do not expose this API. The hook will fall back to always notifying if the D-Bus lookup fails.
 
 - **kdotool is required for focus detection.** `kdotool` is a Wayland-native tool that queries KWin's D-Bus scripting interface. If it is not installed, the script detects its absence at startup and falls back to always notifying rather than failing silently.
 
