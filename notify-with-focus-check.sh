@@ -185,7 +185,12 @@ fi
 
 ACTIVE_WIN_PID=$(kdotool getwindowpid "$ACTIVE_UUID" 2>/dev/null || true)
 
-if [[ ! "$ACTIVE_WIN_PID" =~ ^[0-9]+$ || "$ACTIVE_WIN_PID" != "$KONSOLE_PID" ]]; then
+if [[ ! "$ACTIVE_WIN_PID" =~ ^[0-9]+$ ]]; then
+    >&2 echo "notify-with-focus-check: kdotool getwindowpid returned non-integer ($ACTIVE_WIN_PID)"
+    _notify; exit 0
+fi
+
+if [[ "$ACTIVE_WIN_PID" != "$KONSOLE_PID" ]]; then
     >&2 echo "notify-with-focus-check: active window PID ($ACTIVE_WIN_PID) does not match konsole PID ($KONSOLE_PID)"
     _notify; exit 0
 fi
@@ -212,7 +217,11 @@ if [[ -z "$KONSOLE_OBJECTS" ]]; then
     if [[ -n "$KONSOLE_OBJECTS" ]]; then
         fallback_pid=$(timeout 2 "$QDBUS" org.freedesktop.DBus /org/freedesktop/DBus \
             org.freedesktop.DBus.GetConnectionUnixProcessID "$KONSOLE_SVC" 2>/dev/null || true)
-        if [[ ! "$fallback_pid" =~ ^[0-9]+$ || "$fallback_pid" != "$KONSOLE_PID" ]]; then
+        if [[ ! "$fallback_pid" =~ ^[0-9]+$ ]]; then
+            >&2 echo "notify-with-focus-check: fallback D-Bus service returned non-integer PID ($fallback_pid)"
+            _notify; exit 0
+        fi
+        if [[ "$fallback_pid" != "$KONSOLE_PID" ]]; then
             >&2 echo "notify-with-focus-check: fallback D-Bus service PID ($fallback_pid) does not match konsole PID ($KONSOLE_PID)"
             _notify; exit 0
         fi

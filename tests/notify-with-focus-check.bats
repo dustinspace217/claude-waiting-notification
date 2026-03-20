@@ -141,7 +141,7 @@ teardown() {
         /usr/bin/bash "$SCRIPT"
     [ "$status" -eq 0 ]
     notify_fired
-    [[ "$output" == *"kdotool not found"* ]]
+    [[  "$output" == *"kdotool not found"* ]]
 }
 
 @test "02: no qdbus binary found → _notify fires" {
@@ -302,15 +302,15 @@ esac'
 }
 
 @test "08b: kdotool getwindowpid returns non-integer → _notify fires" {
-    # The integer validation at script line 168 checks ^[0-9]+$ before comparing
-    # to KONSOLE_PID.  Test 08 covers a numeric-but-mismatched PID.  This test
-    # covers the non-integer branch: the regex fails and the script fires _notify
-    # without reaching any D-Bus session logic.
+    # The integer validation checks ^[0-9]+$ before comparing to KONSOLE_PID.
+    # Test 08 covers a numeric-but-mismatched PID.  This test covers the
+    # non-integer branch: the regex fails and the script fires _notify with a
+    # distinct "non-integer" message, before reaching any D-Bus session logic.
     export MOCK_KDOTOOL_PID="not-a-number"
     run bash "$SCRIPT"
     [ "$status" -eq 0 ]
     notify_fired
-    [[ "$output" == *"active window PID"*"does not match konsole PID"* ]]
+    [[ "$output" == *"kdotool getwindowpid returned non-integer"* ]]
 }
 
 @test "09: Konsole D-Bus service unreachable → _notify fires" {
@@ -343,11 +343,10 @@ esac'
 }
 
 @test "10b: fallback D-Bus PID is non-integer → _notify fires" {
-    # Exercises the non-integer branch of the fallback PID check at script
-    # line 195: [[ ! "$fallback_pid" =~ ^[0-9]+$ || ... ]].
+    # Exercises the non-integer branch of the fallback PID check.
     # Test 10 covers a numeric-but-wrong PID (9999).  This test has
     # org.freedesktop.DBus return an empty string so fallback_pid="" fails the
-    # regex, producing: "fallback D-Bus service PID () does not match konsole PID (3000)".
+    # ^[0-9]+$ regex, producing the distinct "non-integer PID" message.
     write_file "$MOCK_BIN/qdbus-qt6" '#!/bin/bash
 SVC="${1:-}"; OBJ="${2:-}"
 case "$SVC" in
@@ -363,7 +362,7 @@ esac'
     run bash "$SCRIPT"
     [ "$status" -eq 0 ]
     notify_fired
-    [[ "$output" == *"fallback D-Bus service PID"*"does not match"* ]]
+    [[ "$output" == *"fallback D-Bus service returned non-integer PID"* ]]
 }
 
 # ── Session / tab detection tests ─────────────────────────────────────────────
