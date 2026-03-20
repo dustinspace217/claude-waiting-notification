@@ -24,7 +24,7 @@ fake_proc() {
 }
 
 # True if the notify-send sentinel was written (meaning _notify ran).
-notify_fired()     { [[ -f "$BATS_TMPDIR/notify-fired" ]]; }
+notify_fired()     { [[ -f "$MOCK_BIN/notify-fired" ]]; }
 notify_suppressed() { ! notify_fired; }
 
 # ── Setup / teardown ──────────────────────────────────────────────────────────
@@ -38,8 +38,6 @@ setup() {
     FAKE_PROC="$(mktemp -d)"
     export _NOTIFY_PROC_ROOT="$FAKE_PROC"
 
-    rm -f "$BATS_TMPDIR/notify-fired"
-
     export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/1000/bus"
 
     # --- sleep shim -----------------------------------------------------------
@@ -50,9 +48,11 @@ exec /usr/bin/sleep "$@"'
     chmod +x "$MOCK_BIN/sleep"
 
     # --- notify-send mock -----------------------------------------------------
+    # Sentinel path is baked in as a literal string (MOCK_BIN expanded at setup
+    # time).  Using MOCK_BIN (unique per-test mktemp dir) rather than BATS_TMPDIR
+    # (shared across all tests in a suite run) prevents cross-test contamination.
     write_file "$MOCK_BIN/notify-send" "#!/bin/bash
-# Use a bash builtin redirect instead of touch to avoid PATH dependency.
-: > '$BATS_TMPDIR/notify-fired'"
+: > '$MOCK_BIN/notify-fired'"
     chmod +x "$MOCK_BIN/notify-send"
 
     # --- paplay mock ----------------------------------------------------------
@@ -116,7 +116,7 @@ esac'
 
 teardown() {
     rm -rf "$MOCK_BIN" "$FAKE_PROC"
-    rm -f "$BATS_TMPDIR/notify-fired"
+    # Sentinel ($MOCK_BIN/notify-fired) is removed as part of rm -rf $MOCK_BIN.
 }
 
 # ── Prerequisite / early-exit tests ──────────────────────────────────────────
