@@ -4,9 +4,9 @@
 # Run with:  bats tests/notify-with-focus-check.bats
 # Requires:  sudo dnf install bats
 #
-# All external binaries (kdotool, qdbus-qt6, notify-send, paplay) are mocked
-# via PATH prepend.  Process-tree walks use _NOTIFY_PROC_ROOT + _START_PID so tests
-# never depend on running inside a real Konsole session.
+# All external binaries (kdotool, qdbus-qt6, timeout, notify-send, paplay) are
+# mocked via PATH prepend.  Process-tree walks use _NOTIFY_PROC_ROOT + _START_PID
+# so tests never depend on running inside a real Konsole session.
 
 SCRIPT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/notify-with-focus-check.sh"
 
@@ -121,9 +121,10 @@ teardown() {
 
 # ── Prerequisite / early-exit tests ──────────────────────────────────────────
 # Tests 01–03 exit before the watchdog is set up, so the restricted PATH used
-# by 01 and 02 does not cause issues with the watchdog's sleep call.
+# by 01, 02, and 02c does not cause issues with the watchdog's sleep call.
 # Test 02b also uses restricted PATH but runs the full script — it installs
 # a timeout shim so the watchdog and qdbus timeout calls work under env -i.
+# Test 02c hides timeout but exits at the prerequisite check, before watchdog.
 # Test 04 runs past the watchdog setup (it fails during the proc-tree walk);
 # the sleep shim in MOCK_BIN handles the watchdog's sleep call correctly.
 
@@ -205,6 +206,22 @@ esac'
     notify_suppressed
 }
 
+@test "02c: timeout not in PATH → _notify fires" {
+    # The timeout prerequisite check fires before the watchdog is set up, so
+    # a restricted PATH without timeout exits cleanly without needing a sleep shim.
+    # kdotool and qdbus-qt6 are still in MOCK_BIN so the script passes those
+    # checks before reaching the timeout guard.
+    run env -i \
+        "PATH=$MOCK_BIN" \
+        "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" \
+        "_NOTIFY_PROC_ROOT=$_NOTIFY_PROC_ROOT" \
+        "_START_PID=$_START_PID" \
+        /usr/bin/bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    notify_fired
+    [[ "$output" == *"timeout not found"* ]]
+}
+
 @test "03: DBUS_SESSION_BUS_ADDRESS unset → _notify fires" {
     run env -u DBUS_SESSION_BUS_ADDRESS bash "$SCRIPT"
     [ "$status" -eq 0 ]
@@ -273,6 +290,7 @@ esac'
     run bash "$SCRIPT"
     [ "$status" -eq 0 ]
     notify_fired
+    [[ "$output" == *"active window class is not Konsole"* ]]
 }
 
 @test "08: active window PID does not match KONSOLE_PID → _notify fires" {
@@ -280,6 +298,19 @@ esac'
     run bash "$SCRIPT"
     [ "$status" -eq 0 ]
     notify_fired
+    [[ "$output" == *"active window PID"*"does not match konsole PID"* ]]
+}
+
+@test "08b: kdotool getwindowpid returns non-integer → _notify fires" {
+    # The integer validation at script line 168 checks ^[0-9]+$ before comparing
+    # to KONSOLE_PID.  Test 08 covers a numeric-but-mismatched PID.  This test
+    # covers the non-integer branch: the regex fails and the script fires _notify
+    # without reaching any D-Bus session logic.
+    export MOCK_KDOTOOL_PID="not-a-number"
+    run bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    notify_fired
+    [[ "$output" == *"active window PID"*"does not match konsole PID"* ]]
 }
 
 @test "09: Konsole D-Bus service unreachable → _notify fires" {
@@ -302,6 +333,30 @@ case "$SVC" in
         ;;
     org.freedesktop.DBus)
         echo "9999"   # wrong PID — does not match KONSOLE_PID (3000)
+        ;;
+esac'
+    chmod +x "$MOCK_BIN/qdbus-qt6"
+    run bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    notify_fired
+    [[ "$output" == *"fallback D-Bus service PID"*"does not match"* ]]
+}
+
+@test "10b: fallback D-Bus PID is non-integer → _notify fires" {
+    # Exercises the non-integer branch of the fallback PID check at script
+    # line 195: [[ ! "$fallback_pid" =~ ^[0-9]+$ || ... ]].
+    # Test 10 covers a numeric-but-wrong PID (9999).  This test has
+    # org.freedesktop.DBus return an empty string so fallback_pid="" fails the
+    # regex, producing: "fallback D-Bus service PID () does not match konsole PID (3000)".
+    write_file "$MOCK_BIN/qdbus-qt6" '#!/bin/bash
+SVC="${1:-}"; OBJ="${2:-}"
+case "$SVC" in
+    org.kde.konsole-*)  exit 1 ;;
+    org.kde.konsole)
+        [[ -z "$OBJ" ]] && printf "/Sessions/1\n/Windows/1\n"
+        ;;
+    org.freedesktop.DBus)
+        echo ""
         ;;
 esac'
     chmod +x "$MOCK_BIN/qdbus-qt6"
@@ -400,6 +455,7 @@ esac'
     run bash "$SCRIPT"
     [ "$status" -eq 0 ]
     [[ "$output" != *"ancestor konsole process not found"* ]]
+    notify_suppressed
 }
 
 @test "22: konsole is 5 levels up in tree → KONSOLE_PID still found" {
@@ -415,4 +471,19 @@ esac'
     run bash "$SCRIPT"
     [ "$status" -eq 0 ]
     [[ "$output" != *"ancestor konsole process not found"* ]]
+    notify_suppressed
+}
+
+# ── Additional coverage for identified branch gaps ─────────────────────────────
+
+@test "23: _START_PID is konsole itself → CHAIN_PIDS empty → _notify fires" {
+    # When _START_PID points directly at the konsole process, the walk finds
+    # "konsole" on the very first iteration and breaks before recording anything
+    # into CHAIN_PIDS.  KONSOLE_PID is set to 3000, but CHAIN_PIDS has zero
+    # entries, so the guard -z "${CHAIN_PIDS[*]+x}" fires and calls _notify.
+    export _START_PID=3000   # default fake proc tree has 3000 as "konsole"
+    run bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    notify_fired
+    [[ "$output" == *"ancestor konsole process not found"* ]]
 }
