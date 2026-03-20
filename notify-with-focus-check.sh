@@ -50,6 +50,67 @@ _notify() {
     disown $!
 }
 
+# ── Notify-with-click-to-focus helper ─────────────────────────────────────────
+# Called at the final exit point: our tab is confirmed to exist in this Konsole
+# instance, but is not the currently visible tab.
+#
+# Sends a desktop notification with a "Focus Claude" action button and plays the
+# chime immediately.  A background subshell then waits (via notify-send --wait)
+# for the user to click the action button; on click it:
+#   1. Calls setCurrentSession on every Konsole window — only the window that
+#      owns our session ID responds, switching to the Claude tab.
+#   2. Calls kdotool windowactivate to raise the Konsole window to the
+#      foreground (Wayland-native; routes through KWin's D-Bus API).
+#
+# The subshell is immediately disowned so the main script exits without waiting
+# for notification dismissal or click — Claude Code continues unblocked.
+#
+# Requires: libnotify >= 0.7.8 for --action / --wait flags (standard on KDE
+#   Plasma; verify with: notify-send --version).
+# Globals read (inherited by the subshell automatically):
+#   QDBUS           – path to qdbus-qt6 or qdbus
+#   KONSOLE_SVC     – org.kde.konsole-<PID> D-Bus service name
+#   KONSOLE_OBJECTS – cached list of D-Bus objects for this Konsole instance
+#   OUR_SESSION_ID  – numeric ID of the tab that triggered this hook
+#   ACTIVE_UUID     – KWin window UUID of the focused Konsole window
+_notify_clickable() {
+    (
+        # --wait blocks until the notification is dismissed or an action is
+        # clicked.  On click, notify-send prints the action key ("focus") to
+        # stdout and exits 0.  On dismiss with no click, it prints nothing and
+        # exits non-zero.  '|| true' prevents a non-zero exit from killing the
+        # subshell so the paplay below always fires.
+        action=$(notify-send \
+            --app-name="Claude Code" \
+            --icon=dialog-information \
+            --urgency=normal \
+            --action="focus=Focus Claude" \
+            --wait \
+            "Claude Code" \
+            "Waiting for your input" 2>/dev/null || true)
+
+        if [[ "$action" == "focus" ]]; then
+            # Switch to our tab.  Calling setCurrentSession on every window is
+            # safe: windows that do not own session $OUR_SESSION_ID ignore it.
+            while IFS= read -r win_path; do
+                [[ "$win_path" =~ ^/Windows/[0-9]+$ ]] || continue
+                "$QDBUS" "$KONSOLE_SVC" "$win_path" \
+                    org.kde.konsole.Window.setCurrentSession "$OUR_SESSION_ID" \
+                    2>/dev/null || true
+            done <<< "$KONSOLE_OBJECTS"
+
+            # Raise the Konsole window.  ACTIVE_UUID is the KWin UUID of this
+            # specific Konsole instance, captured during the early kdotool check.
+            kdotool windowactivate "$ACTIVE_UUID" 2>/dev/null || true
+        fi
+    ) &
+    disown $!
+
+    # Play chime immediately — do not wait for the background click handler.
+    paplay /usr/share/sounds/freedesktop/stereo/message-new-instant.oga &
+    disown $!
+}
+
 # ── Prerequisites ─────────────────────────────────────────────────────────────
 # kdotool provides Wayland-native active-window queries via KWin's D-Bus API.
 # Without it the focus check is not possible.
@@ -283,8 +344,9 @@ while IFS= read -r win_path; do
     fi
 done <<< "$KONSOLE_OBJECTS"
 
-# ── Notify ────────────────────────────────────────────────────────────────────
+# ── Notify with click-to-focus ────────────────────────────────────────────────
 # Reached when our tab exists but is not the current tab in any focused window.
 # All prior checks confirmed Konsole is focused — our tab simply isn't the
-# visible one.  exit 0 is explicit for consistency with every other code path.
-_notify; exit 0
+# visible one.  The "Focus Claude" action button in the notification raises our
+# tab and brings the Konsole window to the foreground when clicked.
+_notify_clickable; exit 0
