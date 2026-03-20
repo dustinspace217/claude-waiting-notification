@@ -32,6 +32,8 @@ set -u
 #   timeout                            (GNU coreutils — present by default on all
 #                                       standard Fedora installs; only absent in
 #                                       stripped or minimal container environments)
+#   notify-send                        (libnotify — present on standard KDE Plasma)
+#   paplay                             (pulseaudio-utils — present on standard Fedora)
 
 # ── Notify helper ─────────────────────────────────────────────────────────────
 # Called at every early-exit point so failures always produce a notification
@@ -96,11 +98,11 @@ fi
 # on normal exit so there is no orphan sleep process.
 # Note: $$ inside ( ... ) & correctly refers to this script's PID in bash
 # (POSIX-specified — $$ is not re-evaluated in subshells).
-( sleep 30; kill $$ 2>/dev/null ) &
+( sleep 30; kill $$ 2>/dev/null ) &   # 'kill' without -s sends SIGTERM by default
 _WATCHDOG_PID=$!
 trap 'kill "$_WATCHDOG_PID" 2>/dev/null' EXIT
-# If the watchdog fires SIGTERM (KWin unresponsive for 30 s), call _notify
-# before dying so the user still gets a notification in that failure mode.
+# If the watchdog fires (KWin unresponsive for 30 s), its SIGTERM is caught here.
+# Call _notify before dying so the user still gets a notification in that failure mode.
 trap '_notify; exit 0' TERM
 
 # ── Walk process tree from $$ up to konsole ───────────────────────────────────
@@ -150,10 +152,12 @@ while [[ "$pid" -gt 1 ]]; do
     pid="$next_pid"
 done
 
-# ${CHAIN_PIDS[*]+x} expands to "x" when the array has any entries, empty when it
-# has none.  Using the +word form (rather than ${#CHAIN_PIDS[@]}) avoids a bash 5.3
-# bug where ${#assoc[@]} raises "unbound variable" for a declared-but-empty array
-# under set -u.
+# ${CHAIN_PIDS[*]+x} returns "x" when the array has at least one entry, empty string
+# when it has none.  The [*] subscript expands to all values space-joined; an empty
+# expansion is treated as unset by the +word operator, so the result is "".  This
+# avoids a bash 5.3 bug where ${#assoc[@]} raises "unbound variable" for a
+# declared-but-empty associative array under set -u; the +word form is safe even
+# for empty declared arrays.
 if [[ -z "$KONSOLE_PID" || -z "${CHAIN_PIDS[*]+x}" ]]; then
     >&2 echo "notify-with-focus-check: ancestor konsole process not found"
     _notify; exit 0

@@ -486,3 +486,153 @@ esac'
     notify_fired
     [[ "$output" == *"ancestor konsole process not found"* ]]
 }
+
+# ── Fallback D-Bus path: full end-to-end ──────────────────────────────────
+# Tests 10 and 10b exercise the fallback PID mismatch branches (early exit).
+# Test 09 makes both the primary and fallback services return empty.
+# These two tests are the first where the fallback path succeeds all the way
+# through PID verification and into the session/window loops.
+
+@test "24: primary D-Bus service fails, fallback succeeds with matching PID → suppressed" {
+    # 1. org.kde.konsole-3000 returns empty (primary not registered)
+    # 2. org.kde.konsole returns objects (fallback registered)
+    # 3. GetConnectionUnixProcessID returns 3000 (matches KONSOLE_PID)
+    # 4. /Sessions/1 processId = 4000 (in CHAIN_PIDS)
+    # 5. /Windows/1 currentSession = 1 (our session) → suppress
+    write_file "$MOCK_BIN/qdbus-qt6" '#!/bin/bash
+SVC="${1:-}"; OBJ="${2:-}"
+case "$SVC" in
+    org.kde.konsole-*)  exit 0 ;;   # primary: empty, not registered
+    org.kde.konsole)
+        if [[ -z "$OBJ" ]]; then
+            printf "/Sessions/1\n/Windows/1\n"
+        elif [[ "$OBJ" == /Sessions/1 ]]; then
+            echo "4000"   # in CHAIN_PIDS {5000,4000}
+        elif [[ "$OBJ" == /Windows/1 ]]; then
+            echo "1"      # matches OUR_SESSION_ID "1"
+        fi ;;
+    org.freedesktop.DBus)
+        echo "3000" ;;    # matches KONSOLE_PID
+esac'
+    chmod +x "$MOCK_BIN/qdbus-qt6"
+    run bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    notify_suppressed
+}
+
+@test "25: primary D-Bus fails, fallback succeeds, tab is background → _notify fires" {
+    # Same fallback path as test 24 but currentSession differs — our tab is not active.
+    write_file "$MOCK_BIN/qdbus-qt6" '#!/bin/bash
+SVC="${1:-}"; OBJ="${2:-}"
+case "$SVC" in
+    org.kde.konsole-*)  exit 0 ;;
+    org.kde.konsole)
+        if [[ -z "$OBJ" ]]; then
+            printf "/Sessions/1\n/Windows/1\n"
+        elif [[ "$OBJ" == /Sessions/1 ]]; then
+            echo "4000"
+        elif [[ "$OBJ" == /Windows/1 ]]; then
+            echo "2"   # currentSession 2 ≠ OUR_SESSION_ID "1"
+        fi ;;
+    org.freedesktop.DBus)
+        echo "3000" ;;
+esac'
+    chmod +x "$MOCK_BIN/qdbus-qt6"
+    run bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    notify_fired
+}
+
+# ── Session loop: skip-then-find ─────────────────────────────────────────────
+# Tests 14 and 15 exhaust the session loop with no match.  These two tests are
+# the first where the loop skips one session and then correctly finds another.
+
+@test "26: two sessions, first PID not in CHAIN_PIDS, second is → suppressed" {
+    # /Sessions/1 processId=99999 (not in chain) → continue
+    # /Sessions/2 processId=4000  (in chain)     → OUR_SESSION_ID="2"
+    # /Windows/1  currentSession=2               → suppress
+    write_file "$MOCK_BIN/qdbus-qt6" '#!/bin/bash
+SVC="${1:-}"; OBJ="${2:-}"
+case "$SVC" in
+    org.kde.konsole*)
+        if [[ -z "$OBJ" ]]; then
+            printf "/Sessions/1\n/Sessions/2\n/Windows/1\n"
+        elif [[ "$OBJ" == /Sessions/1 ]]; then
+            echo "99999"   # not in CHAIN_PIDS
+        elif [[ "$OBJ" == /Sessions/2 ]]; then
+            echo "4000"    # in CHAIN_PIDS
+        elif [[ "$OBJ" == /Windows/1 ]]; then
+            echo "2"       # matches OUR_SESSION_ID "2"
+        fi ;;
+esac'
+    chmod +x "$MOCK_BIN/qdbus-qt6"
+    run bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    notify_suppressed
+}
+
+@test "27: two sessions, first skipped, second found, tab is background → _notify fires" {
+    # Same session-skip-then-find as test 26 but our tab is not the active one.
+    write_file "$MOCK_BIN/qdbus-qt6" '#!/bin/bash
+SVC="${1:-}"; OBJ="${2:-}"
+case "$SVC" in
+    org.kde.konsole*)
+        if [[ -z "$OBJ" ]]; then
+            printf "/Sessions/1\n/Sessions/2\n/Windows/1\n"
+        elif [[ "$OBJ" == /Sessions/1 ]]; then
+            echo "99999"
+        elif [[ "$OBJ" == /Sessions/2 ]]; then
+            echo "4000"
+        elif [[ "$OBJ" == /Windows/1 ]]; then
+            echo "1"   # currentSession 1 ≠ OUR_SESSION_ID "2"
+        fi ;;
+esac'
+    chmod +x "$MOCK_BIN/qdbus-qt6"
+    run bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    notify_fired
+}
+
+# ── Window loop: malformed path is skipped ────────────────────────────────────
+# The window loop guards each path with [[ "$win_path" =~ ^/Windows/[0-9]+$ ]].
+# No previous test reaches the window loop with a malformed window path in the
+# objects list.
+
+@test "28: malformed window path is skipped, valid window still suppresses" {
+    # /Windows/foo fails ^/Windows/[0-9]+$ and is skipped.
+    # /Windows/1 is still checked and matches OUR_SESSION_ID → suppress.
+    write_file "$MOCK_BIN/qdbus-qt6" '#!/bin/bash
+SVC="${1:-}"; OBJ="${2:-}"
+case "$SVC" in
+    org.kde.konsole*)
+        if [[ -z "$OBJ" ]]; then
+            printf "/Sessions/1\n/Windows/foo\n/Windows/1\n"
+        elif [[ "$OBJ" == /Sessions/1 ]]; then
+            echo "4000"
+        elif [[ "$OBJ" == /Windows/1 ]]; then
+            echo "1"   # matches OUR_SESSION_ID "1"
+        fi ;;
+esac'
+    chmod +x "$MOCK_BIN/qdbus-qt6"
+    run bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    notify_suppressed
+}
+
+@test "29: all window paths malformed → loop body never runs, _notify fires" {
+    # Every window path fails the regex; the loop exits without suppressing.
+    write_file "$MOCK_BIN/qdbus-qt6" '#!/bin/bash
+SVC="${1:-}"; OBJ="${2:-}"
+case "$SVC" in
+    org.kde.konsole*)
+        if [[ -z "$OBJ" ]]; then
+            printf "/Sessions/1\n/Windows/foo\n/Windows/bar\n"
+        elif [[ "$OBJ" == /Sessions/1 ]]; then
+            echo "4000"
+        fi ;;
+esac'
+    chmod +x "$MOCK_BIN/qdbus-qt6"
+    run bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    notify_fired
+}
