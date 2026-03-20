@@ -29,6 +29,9 @@ set -u
 # Requirements:
 #   sudo dnf install kdotool           (official Fedora repos)
 #   sudo dnf install qt6-qttools       (provides /usr/bin/qdbus-qt6)
+#   timeout                            (GNU coreutils — present by default on all
+#                                       standard Fedora installs; only absent in
+#                                       stripped or minimal container environments)
 
 # ── Notify helper ─────────────────────────────────────────────────────────────
 # Called at every early-exit point so failures always produce a notification
@@ -73,6 +76,16 @@ if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
     _notify; exit 0
 fi
 
+# timeout (GNU coreutils) wraps every qdbus call to cap per-call latency at
+# 2 seconds.  Present on all standard Linux installations; guard here so a
+# missing binary produces an actionable error rather than silently converting
+# every D-Bus call into an empty string and failing with a misleading
+# "could not reach Konsole D-Bus service" message.
+if ! command -v timeout &>/dev/null; then
+    >&2 echo "notify-with-focus-check: timeout not found — install with: sudo dnf install coreutils"
+    _notify; exit 0
+fi
+
 # ── Global timeout watchdog ────────────────────────────────────────────────────
 # Cap total runtime at 30 seconds.  Each qdbus call has a 2-second timeout;
 # the worst-case D-Bus stack is (3 + N + M) × 2 seconds where N is the
@@ -86,6 +99,9 @@ fi
 ( sleep 30; kill $$ 2>/dev/null ) &
 _WATCHDOG_PID=$!
 trap 'kill "$_WATCHDOG_PID" 2>/dev/null' EXIT
+# If the watchdog fires SIGTERM (KWin unresponsive for 30 s), call _notify
+# before dying so the user still gets a notification in that failure mode.
+trap '_notify; exit 0' TERM
 
 # ── Walk process tree from $$ up to konsole ───────────────────────────────────
 # A single pass builds CHAIN_PIDS and locates KONSOLE_PID simultaneously,
@@ -134,7 +150,11 @@ while [[ "$pid" -gt 1 ]]; do
     pid="$next_pid"
 done
 
-if [[ -z "$KONSOLE_PID" || "${#CHAIN_PIDS[@]}" -eq 0 ]]; then
+# ${CHAIN_PIDS[*]+x} expands to "x" when the array has any entries, empty when it
+# has none.  Using the +word form (rather than ${#CHAIN_PIDS[@]}) avoids a bash 5.3
+# bug where ${#assoc[@]} raises "unbound variable" for a declared-but-empty array
+# under set -u.
+if [[ -z "$KONSOLE_PID" || -z "${CHAIN_PIDS[*]+x}" ]]; then
     >&2 echo "notify-with-focus-check: ancestor konsole process not found"
     _notify; exit 0
 fi
@@ -159,14 +179,14 @@ fi
 ACTIVE_CLASS=$(kdotool getwindowclassname "$ACTIVE_UUID" 2>/dev/null || true)
 
 if [[ "$ACTIVE_CLASS" != "org.kde.konsole" ]]; then
-    # Focused window is not Konsole — user is in another application.
+    >&2 echo "notify-with-focus-check: active window class is not Konsole ($ACTIVE_CLASS)"
     _notify; exit 0
 fi
 
 ACTIVE_WIN_PID=$(kdotool getwindowpid "$ACTIVE_UUID" 2>/dev/null || true)
 
 if [[ ! "$ACTIVE_WIN_PID" =~ ^[0-9]+$ || "$ACTIVE_WIN_PID" != "$KONSOLE_PID" ]]; then
-    # PID was non-integer or belongs to a different konsole instance.
+    >&2 echo "notify-with-focus-check: active window PID ($ACTIVE_WIN_PID) does not match konsole PID ($KONSOLE_PID)"
     _notify; exit 0
 fi
 
@@ -251,4 +271,7 @@ while IFS= read -r win_path; do
 done <<< "$KONSOLE_OBJECTS"
 
 # ── Notify ────────────────────────────────────────────────────────────────────
-_notify
+# Reached when our tab exists but is not the current tab in any focused window.
+# All prior checks confirmed Konsole is focused — our tab simply isn't the
+# visible one.  exit 0 is explicit for consistency with every other code path.
+_notify; exit 0
