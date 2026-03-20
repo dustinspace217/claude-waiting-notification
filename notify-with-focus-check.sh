@@ -7,10 +7,6 @@ set -u
 # for user input, but skips both if the Konsole tab that triggered this
 # hook is currently the visible tab in the focused Konsole window.
 #
-# Notification type filter: only fires for 'waiting_for_user_input'.
-# Other types (e.g. 'permission_prompt') surface inline in the terminal
-# and do not need an additional desktop notification.
-#
 # Detection strategy:
 #   1. Walk the process tree upward from this hook's PID to find the ancestor
 #      'konsole' process, recording every PID along the way.
@@ -33,22 +29,6 @@ set -u
 # Requirements:
 #   sudo dnf install kdotool           (official Fedora repos)
 #   sudo dnf install qt6-qttools       (provides /usr/bin/qdbus-qt6)
-
-# ── Filter by notification type ───────────────────────────────────────────────
-# The Notification hook receives a JSON payload on stdin containing a
-# notification_type field.  We only want a desktop pop-up for the
-# 'waiting_for_user_input' state.  Other known types:
-#   permission_prompt  — Claude needs tool approval; the terminal shows this
-#                        inline and a desktop notification is redundant noise.
-# Unknown/future types fall through (safe default: notify rather than drop).
-_HOOK_STDIN=$(cat)
-_NOTIF_TYPE=$(python3 -c \
-    "import json,sys; d=json.load(sys.stdin); print(d.get('notification_type',''))" \
-    <<< "$_HOOK_STDIN" 2>/dev/null || true)
-
-if [[ "$_NOTIF_TYPE" == "permission_prompt" ]]; then
-    exit 0
-fi
 
 # ── Notify helper ─────────────────────────────────────────────────────────────
 # Called at every early-exit point so failures always produce a notification
