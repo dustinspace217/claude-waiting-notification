@@ -122,6 +122,8 @@ teardown() {
 # ── Prerequisite / early-exit tests ──────────────────────────────────────────
 # Tests 01–03 exit before the watchdog is set up, so the restricted PATH used
 # by 01 and 02 does not cause issues with the watchdog's sleep call.
+# Test 02b also uses restricted PATH but runs the full script — it installs
+# a timeout shim so the watchdog and qdbus timeout calls work under env -i.
 # Test 04 runs past the watchdog setup (it fails during the proc-tree walk);
 # the sleep shim in MOCK_BIN handles the watchdog's sleep call correctly.
 
@@ -153,6 +155,54 @@ teardown() {
     [ "$status" -eq 0 ]
     notify_fired
     [[ "$output" == *"no qdbus binary found"* ]]
+}
+
+@test "02b: qdbus fallback (no qdbus-qt6) → proceeds and suppresses" {
+    # When qdbus-qt6 is absent but plain qdbus is present, the script should
+    # set QDBUS="qdbus" and proceed to the suppress outcome normally.
+    # env -i is required so the system /usr/bin/qdbus-qt6 is also hidden.
+    rm -f "$MOCK_BIN/qdbus-qt6"
+
+    # timeout shim: qdbus calls use 'timeout 2 qdbus ...' and /usr/bin/timeout
+    # is not on the restricted PATH, so provide a passthrough shim.
+    write_file "$MOCK_BIN/timeout" '#!/bin/bash
+exec /usr/bin/timeout "$@"'
+    chmod +x "$MOCK_BIN/timeout"
+
+    # qdbus mock: same contract as the qdbus-qt6 mock in setup().
+    write_file "$MOCK_BIN/qdbus" '#!/bin/bash
+SVC="${1:-}"; OBJ="${2:-}"
+case "$SVC" in
+    org.kde.konsole*)
+        if [[ -z "$OBJ" ]]; then
+            printf "%s\n" $MOCK_OBJECTS
+        elif [[ "$OBJ" == /Sessions/* ]]; then
+            echo "$MOCK_SESSION_PID"
+        elif [[ "$OBJ" == /Windows/* ]]; then
+            echo "$MOCK_CURRENT_SESSION"
+        fi
+        ;;
+    org.freedesktop.DBus)
+        echo "$MOCK_FALLBACK_PID"
+        ;;
+esac'
+    chmod +x "$MOCK_BIN/qdbus"
+
+    run env -i \
+        "PATH=$MOCK_BIN" \
+        "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" \
+        "_NOTIFY_PROC_ROOT=$_NOTIFY_PROC_ROOT" \
+        "_START_PID=$_START_PID" \
+        "MOCK_OBJECTS=$MOCK_OBJECTS" \
+        "MOCK_SESSION_PID=$MOCK_SESSION_PID" \
+        "MOCK_CURRENT_SESSION=$MOCK_CURRENT_SESSION" \
+        "MOCK_FALLBACK_PID=$MOCK_FALLBACK_PID" \
+        "MOCK_KDOTOOL_UUID=$MOCK_KDOTOOL_UUID" \
+        "MOCK_KDOTOOL_CLASS=$MOCK_KDOTOOL_CLASS" \
+        "MOCK_KDOTOOL_PID=$MOCK_KDOTOOL_PID" \
+        /usr/bin/bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    notify_suppressed
 }
 
 @test "03: DBUS_SESSION_BUS_ADDRESS unset → _notify fires" {
